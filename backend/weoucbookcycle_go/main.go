@@ -52,7 +52,7 @@ func main() {
 	}
 
 	// 打印启动信息
-	config.PrintStartupInfo(config.GetServerConfig().Port, config.GetServerConfig().APIBase, config.GetUseCloud())
+	config.PrintStartupInfo(config.GetServerConfig().Port, os.Getenv("API_BASE"), config.GetUseCloud())
 
 	// 自动迁移：仅在非生产环境或显式开启时运行（避免生产环境意外修改）
 	enableAuto := os.Getenv("ENABLE_AUTO_MIGRATE")

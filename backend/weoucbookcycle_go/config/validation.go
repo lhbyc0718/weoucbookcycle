@@ -132,7 +132,7 @@ func PrintStartupInfo(port string, apiBase string, useCloud bool) {
 		)
 	}
 
-	fmt.Println("=============================================\n")
+	fmt.Println("=============================================")
 }
 
 /**
