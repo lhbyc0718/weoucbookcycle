@@ -35,11 +35,24 @@ func main() {
 	}
 	defer middleware.FlushLogger()
 
+	// 验证必需的环境变量
+	if err := config.ValidateRequiredEnv(); err != nil {
+		log.Fatalf("环境变量验证失败: %v", err)
+	}
+
 	// 初始化数据库
 	if err := config.InitDatabase(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer config.CloseDatabase()
+
+	// 验证数据库连接
+	if err := config.ValidateDatabase(config.DB); err != nil {
+		log.Fatalf("数据库连接验证失败: %v", err)
+	}
+
+	// 打印启动信息
+	config.PrintStartupInfo(config.GetServerConfig().Port, config.GetServerConfig().APIBase, config.GetUseCloud())
 
 	// 自动迁移：仅在非生产环境或显式开启时运行（避免生产环境意外修改）
 	enableAuto := os.Getenv("ENABLE_AUTO_MIGRATE")

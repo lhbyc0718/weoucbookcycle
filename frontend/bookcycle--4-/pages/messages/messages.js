@@ -1,5 +1,6 @@
 // pages/messages/messages.js
 const app = getApp();
+const request = require('../../utils/request');
 
 Page({
   data: {
@@ -7,7 +8,8 @@ Page({
     chats: [],
     users: {},
     activeUsers: [],
-    filteredChats: []
+    filteredChats: [],
+    loading: true
   },
 
   onLoad: function() {
@@ -16,46 +18,16 @@ Page({
 
   onShow: function() {
     this.loadData();
-    // start polling or realtime watcher for incoming messages
+    
+    // 启动消息轮询（每4秒检查一次新消息）
     const that = this;
-    if (this._poller) { clearInterval(this._poller); this._poller = null; }
-    if (this._globalWatcher) { try { this._globalWatcher.close(); } catch (e) {} this._globalWatcher = null; }
-    if (wx.cloud && wx.cloud.database) {
-      try {
-        const db = wx.cloud.database();
-        const cmd = db.command;
-        this._globalWatcher = db.collection('messages').where({ senderId: cmd.neq('me') }).watch({
-          onChange: function(snapshot) {
-            // merge incoming cloud messages into local store and notify
-            const docs = snapshot.docs || [];
-            const stored = wx.getStorageSync('messages') || {};
-            let updated = false;
-            docs.forEach(m => {
-              const chatId = m.chatId;
-              stored[chatId] = stored[chatId] || [];
-              if (!stored[chatId].find(x => x.id === m._id)) {
-                stored[chatId].push({ id: m._id, senderId: m.senderId, text: m.text, timestamp: m.timestamp });
-                updated = true;
-              }
-            });
-            if (updated) {
-              try { wx.setStorageSync('messages', stored); } catch (e) {}
-              that.loadData();
-              try { wx.showToast({ title: '您有新消息', icon: 'none', duration: 1500 }); wx.vibrateShort && wx.vibrateShort(); } catch (e) {}
-            }
-          },
-          onError: function(err) {
-            // fallback: start local poller
-            if (that._poller) clearInterval(that._poller);
-            that._poller = setInterval(() => { that.checkForIncomingMessages(); }, 4000);
-          }
-        });
-      } catch (e) {
-        this._poller = setInterval(() => { that.checkForIncomingMessages(); }, 4000);
-      }
-    } else {
-      this._poller = setInterval(() => { that.checkForIncomingMessages(); }, 4000);
+    if (this._poller) {
+      clearInterval(this._poller);
+      this._poller = null;
     }
+    this._poller = setInterval(() => {
+      that.checkForIncomingMessages();
+    }, 4000);
   },
 
   onHide: function() {
@@ -63,265 +35,271 @@ Page({
       clearInterval(this._poller);
       this._poller = null;
     }
-    if (this._globalWatcher) {
-      try { this._globalWatcher.close(); } catch (e) {}
-      this._globalWatcher = null;
-    }
   },
 
+  /**
+   * 加载数据：获取用户列表和聊天列表
+   */
   loadData: function() {
     const that = this;
-    // load users and chats from cloud db when available
-    if (wx.cloud && wx.cloud.database) {
-      const db = wx.cloud.database();
-      Promise.all([
-        db.collection('users').get(),
-        db.collection('chats').get()
-      ]).then(([uRes, cRes]) => {
-        const usersArr = uRes.data || [];
-        const chatsArr = cRes.data || [];
-        const users = {};
-        usersArr.forEach(u => { users[u._openid] = u; });
-        const storedMessagesMap = wx.getStorageSync('messages') || {};
+    this.setData({ loading: true });
 
-        const processedChats = chatsArr.map(chat => {
-          const otherUserId = chat.participants ? (chat.participants.find(p => p !== that.globalData.userInfo.id) || chat.participants[0]) : '';
-          const user = users[otherUserId] || {};
-          const localMsgs = storedMessagesMap[chat._id] || [];
-          const lastLocal = localMsgs.length ? localMsgs[localMsgs.length - 1] : null;
-          return {
-            id: chat._id,
-            ...chat,
-            name: user.name || 'Unknown',
-            avatar: user.avatar || '',
-            lastMessage: lastLocal ? lastLocal.text : (chat.lastMessage || ''),
-            lastMessageTime: lastLocal ? lastLocal.timestamp : (chat.lastMessageTime || ''),
-            unreadCount: chat.unreadCount || 0
-          };
+    // 并行获取用户和聊天列表
+    Promise.all([
+      request.get('/api/users'),
+      request.get('/api/chats')
+    ]).then(([usersResponse, chatsResponse]) => {
+      // 格式化用户数据
+      const users = {};
+      if (Array.isArray(usersResponse)) {
+        usersResponse.forEach(u => {
+          users[u.id] = u;
         });
+      } else if (typeof usersResponse === 'object') {
+        Object.assign(users, usersResponse);
+      }
 
-        // include chats only in local storage (same code as before)
-        Object.keys(storedMessagesMap).forEach(localChatId => {
-          const exists = processedChats.find(c => c.id === localChatId);
-          if (!exists) {
-            const msgs = storedMessagesMap[localChatId];
-            const last = msgs && msgs.length ? msgs[msgs.length - 1] : null;
-            if (localChatId.indexOf('chat_me_') === 0) {
-              const otherId = localChatId.replace('chat_me_', '');
-              processedChats.push({
-                id: localChatId,
-                participants: ['me', otherId],
-                name: (users[otherId] && users[otherId].name) ? users[otherId].name : (last && last.senderId && users[last.senderId] ? users[last.senderId].name : 'Unknown'),
-                avatar: (users[otherId] && users[otherId].avatar) ? users[otherId].avatar : ((last && last.senderId && users[last.senderId]) ? users[last.senderId].avatar : ''),
-                lastMessage: last ? last.text : '',
-                lastMessageTime: last ? last.timestamp : '',
-                unreadCount: 0
-              });
-            } else {
-              processedChats.push({
-                id: localChatId,
-                participants: ['me'],
-                name: last && last.senderId !== 'me' ? (users[last.senderId] ? users[last.senderId].name : 'Unknown') : 'Unknown',
-                avatar: (last && last.senderId && users[last.senderId]) ? users[last.senderId].avatar : '',
-                lastMessage: last ? last.text : '',
-                lastMessageTime: last ? last.timestamp : '',
-                unreadCount: 0
-              });
-            }
-          }
-        });
-        const activeUsersList = Object.values(users).filter(u => u && u._openid !== that.globalData.userInfo.id);
-        that.setData({ users: users, chats: processedChats, activeUsers: activeUsersList, filteredChats: processedChats });
-      }).catch(() => {
-        // fallback to network logic if cloud query fails
-        wx.request({
-          url: app.globalData.apiBase + '/api/init',
-          success: function(res) {
-            const users = res.data.users || {};
-            const chats = res.data.chats || [];
-            const storedMessagesMap = wx.getStorageSync('messages') || {};
-            const processedChats = chats.map(chat => {
-              const otherUserId = chat.participants ? (chat.participants.find(p => p !== 'me') || 'alex') : 'alex';
-              const user = users[otherUserId] || {};
-              const localMsgs = storedMessagesMap[chat.id] || [];
-              const lastLocal = localMsgs.length ? localMsgs[localMsgs.length - 1] : null;
-              return {
-                ...chat,
-                name: user.name || 'Unknown',
-                avatar: user.avatar || '',
-                lastMessage: lastLocal ? lastLocal.text : (chat.lastMessage || ''),
-                lastMessageTime: lastLocal ? lastLocal.timestamp : (chat.lastMessageTime || ''),
-                unreadCount: chat.unreadCount || 0
-              };
-            });
-            const activeUsersList = users ? Object.values(users).filter(u => u && u.id !== 'me') : [];
-            that.setData({ users: users, chats: processedChats, activeUsers: activeUsersList, filteredChats: processedChats });
-          },
-          fail: function() {
-            const mockChats = that.getMockChats();
-            const mockUsers = that.getMockUsers();
-            const storedMessagesMap = wx.getStorageSync('messages') || {};
-            const processedChats = mockChats.map(chat => {
-              const otherUserId = chat.participants ? (chat.participants.find(p => p !== 'me') || 'alex') : 'alex';
-              const user = mockUsers[otherUserId] || {};
-              const localMsgs = storedMessagesMap[chat.id] || [];
-              const lastLocal = localMsgs.length ? localMsgs[localMsgs.length - 1] : null;
-              return {
-                ...chat,
-                name: user.name || 'Unknown',
-                avatar: user.avatar || '',
-                lastMessage: lastLocal ? lastLocal.text : (chat.lastMessage || ''),
-                lastMessageTime: lastLocal ? lastLocal.timestamp : (chat.lastMessageTime || ''),
-                unreadCount: chat.unreadCount || 0
-              };
-            });
-            const activeUsersList = Object.values(mockUsers).filter(u => u && u.id !== 'me');
-            that.setData({ users: mockUsers, chats: processedChats, activeUsers: activeUsersList, filteredChats: processedChats });
-          }
-        });
+      // 格式化聊天数据
+      const chats = Array.isArray(chatsResponse) ? chatsResponse : [];
+      const storedMessagesMap = wx.getStorageSync('messages') || {};
+
+      // 处理聊天列表
+      const processedChats = chats.map(chat => {
+        // 确定对方用户ID
+        const otherUserId = chat.participantId || (chat.participants ? 
+          chat.participants.find(p => p !== app.globalData.userInfo?.id && p !== 'me') : 
+          null);
+        
+        const user = otherUserId ? users[otherUserId] : {};
+        const localMsgs = storedMessagesMap[chat.id] || [];
+        const lastLocal = localMsgs.length ? localMsgs[localMsgs.length - 1] : null;
+
+        return {
+          id: chat.id,
+          ...chat,
+          name: user.nickname || user.name || chat.userName || 'Unknown',
+          avatar: user.avatar || '',
+          lastMessage: lastLocal ? lastLocal.text : (chat.lastMessage || ''),
+          lastMessageTime: lastLocal ? lastLocal.timestamp : (chat.lastMessageTime || new Date()),
+          unreadCount: chat.unreadCount || 0
+        };
       });
-    } else {
-      // non-cloud fallback exactly original wx.request behaviour
-      wx.request({
-        url: app.globalData.apiBase + '/api/init',
-        success: function(res) {
-          const users = res.data.users || {};
-          const chats = res.data.chats || [];
-          const storedMessagesMap = wx.getStorageSync('messages') || {};
-          const processedChats = chats.map(chat => {
-            const otherUserId = chat.participants ? (chat.participants.find(p => p !== 'me') || 'alex') : 'alex';
-            const user = users[otherUserId] || {};
-            const localMsgs = storedMessagesMap[chat.id] || [];
-            const lastLocal = localMsgs.length ? localMsgs[localMsgs.length - 1] : null;
-            return {
-              ...chat,
-              name: user.name || 'Unknown',
-              avatar: user.avatar || '',
-              lastMessage: lastLocal ? lastLocal.text : (chat.lastMessage || ''),
-              lastMessageTime: lastLocal ? lastLocal.timestamp : (chat.lastMessageTime || ''),
-              unreadCount: chat.unreadCount || 0
-            };
-          });
-          // local-only chat code omitted for brevity but can be re-added
-          const activeUsersList = users ? Object.values(users).filter(u => u && u.id !== 'me') : [];
-          that.setData({ users: users, chats: processedChats, activeUsers: activeUsersList, filteredChats: processedChats });
-        },
-        fail: function() {
-          const mockChats = that.getMockChats();
-          const mockUsers = that.getMockUsers();
-          const storedMessagesMap = wx.getStorageSync('messages') || {};
-          const processedChats = mockChats.map(chat => {
-            const otherUserId = chat.participants ? (chat.participants.find(p => p !== 'me') || 'alex') : 'alex';
-            const user = mockUsers[otherUserId] || {};
-            const localMsgs = storedMessagesMap[chat.id] || [];
-            const lastLocal = localMsgs.length ? localMsgs[localMsgs.length - 1] : null;
-            return {
-              ...chat,
-              name: user.name || 'Unknown',
-              avatar: user.avatar || '',
-              lastMessage: lastLocal ? lastLocal.text : (chat.lastMessage || ''),
-              lastMessageTime: lastLocal ? lastLocal.timestamp : (chat.lastMessageTime || ''),
-              unreadCount: chat.unreadCount || 0
-            };
-          });
-          const activeUsersList = Object.values(mockUsers).filter(u => u && u.id !== 'me');
-          that.setData({ users: mockUsers, chats: processedChats, activeUsers: activeUsersList, filteredChats: processedChats });
-        }
+
+      const activeUsersList = Object.values(users).filter(u => 
+        u && u.id !== (app.globalData.userInfo?.id || 'me')
+      );
+
+      that.setData({ 
+        users, 
+        chats: processedChats, 
+        activeUsers: activeUsersList, 
+        filteredChats: processedChats,
+        loading: false 
       });
-    }
+    }).catch((error) => {
+      console.error('Failed to load data:', error);
+      wx.showToast({
+        title: '加载失败，请重试',
+        icon: 'none',
+        duration: 2000
+      });
+      that.setData({ loading: false });
+      
+      // 尝试使用模拟数据作为后备
+      this._loadMockData();
+    });
   },
 
+  /**
+   * 检查新消息（轮询）
+   */
   checkForIncomingMessages: function() {
     const storedMessagesMap = wx.getStorageSync('messages') || {};
-    const lastSeen = wx.getStorageSync('lastSeen') || {};
     const notifiedLast = wx.getStorageSync('notifiedLast') || {};
-    const chats = this.data.chats || [];
+    let chats = this.data.chats || [];
     let sawNew = false;
 
-    // First, check cloud messages if available
-    if (wx.cloud && wx.cloud.database) {
-      const db = wx.cloud.database();
-      const _ = db.command;
-      db.collection('messages').where({ senderId: _.neq('me') }).orderBy('createdAt', 'asc').get().then(res => {
-        const msgs = res.data || [];
-        const messagesMap = { ...storedMessagesMap };
-        msgs.forEach(m => {
-          const chatId = m.chatId;
-          messagesMap[chatId] = messagesMap[chatId] || [];
-          // avoid duplicates
-          if (!messagesMap[chatId].find(x => x.id === m._id)) {
-            const newMsg = { id: m._id, senderId: m.senderId, text: m.text, timestamp: m.timestamp };
-            messagesMap[chatId].push(newMsg);
-          }
+    // 从后端获取最新消息
+    request.get('/api/chats').then(chatsResponse => {
+      const newChats = Array.isArray(chatsResponse) ? chatsResponse : [];
+      const users = this.data.users || {};
 
-          const last = messagesMap[chatId][messagesMap[chatId].length - 1];
-          const seenId = lastSeen[chatId] || null;
-          const notifiedId = notifiedLast[chatId] || null;
-          if (last && last.senderId !== 'me' && notifiedId !== last.id && seenId !== last.id) {
-            sawNew = true;
-            // update chats list
-            const idx = chats.findIndex(c => c.id === chatId);
-            if (idx >= 0) {
-              const c = chats[idx];
-              const unreadCount = (c.unreadCount || 0) + 1;
-              chats[idx] = { ...c, lastMessage: last.text, lastMessageTime: last.timestamp, unreadCount };
-            } else {
-              chats.push({ id: chatId, participants: ['me'], name: 'New Contact', avatar: '', lastMessage: last.text, lastMessageTime: last.timestamp, unreadCount: 1 });
-            }
+      newChats.forEach(newChat => {
+        // 查找是否已存在
+        const existingIndex = chats.findIndex(c => c.id === newChat.id);
+        const otherUserId = newChat.participantId || (newChat.participants ? 
+          newChat.participants.find(p => p !== app.globalData.userInfo?.id) : 
+          null);
+        
+        const user = otherUserId ? users[otherUserId] : {};
+        const localMsgs = storedMessagesMap[newChat.id] || [];
+        const lastLocal = localMsgs.length ? localMsgs[localMsgs.length - 1] : null;
 
-            // mark notified to avoid repeated toasts
-            notifiedLast[chatId] = last.id;
-          }
-        });
-
-        // save merged messages locally
-        try { wx.setStorageSync('messages', messagesMap); } catch (e) {}
-        try { wx.setStorageSync('notifiedLast', notifiedLast); } catch (e) {}
-
-        if (sawNew) {
-          this.setData({ chats: chats, filteredChats: chats });
-          try { wx.showToast({ title: '您有新消息', icon: 'none', duration: 1500 }); wx.vibrateShort && wx.vibrateShort(); } catch (e) {}
+        // 检查是否有新消息需要通知
+        const lastNotified = notifiedLast[newChat.id];
+        if (lastLocal && lastLocal.senderId !== 'me' && lastNotified !== lastLocal.id) {
+          sawNew = true;
+          notifiedLast[newChat.id] = lastLocal.id;
         }
-      }).catch(() => {
-        // fallback to local-only checking below
-        this._checkLocalForIncoming(storedMessagesMap, lastSeen, chats);
-      });
-    } else {
-      // no cloud available — check local stored messages
-      this._checkLocalForIncoming(storedMessagesMap, lastSeen, chats);
-    }
-  },
 
-  _checkLocalForIncoming: function(storedMessagesMap, lastSeen, chats) {
-    let sawNew = false;
-    Object.keys(storedMessagesMap).forEach(chatId => {
-      const msgs = storedMessagesMap[chatId] || [];
-      if (!msgs.length) return;
-      const last = msgs[msgs.length - 1];
-      if (last.senderId === 'me') return; // ignore our own latest
+        const processedChat = {
+          id: newChat.id,
+          ...newChat,
+          name: user.nickname || user.name || newChat.userName || 'Unknown',
+          avatar: user.avatar || '',
+          lastMessage: lastLocal ? lastLocal.text : (newChat.lastMessage || ''),
+          lastMessageTime: lastLocal ? lastLocal.timestamp : (newChat.lastMessageTime || new Date()),
+          unreadCount: newChat.unreadCount || 0
+        };
 
-      const seenId = lastSeen[chatId] || null;
-      if (seenId !== last.id) {
-        sawNew = true;
-
-        // update chats list entry if present
-        const idx = chats.findIndex(c => c.id === chatId);
-        if (idx >= 0) {
-          const c = chats[idx];
-          const unreadCount = (c.unreadCount || 0) + 1;
-          chats[idx] = { ...c, lastMessage: last.text, lastMessageTime: last.timestamp, unreadCount };
+        if (existingIndex >= 0) {
+          chats[existingIndex] = processedChat;
         } else {
-          // add a minimal entry for local-only chat
-          chats.push({ id: chatId, participants: ['me'], name: 'New Contact', avatar: '', lastMessage: last.text, lastMessageTime: last.timestamp, unreadCount: 1 });
+          chats.push(processedChat);
+        }
+      });
+
+      if (sawNew) {
+        try {
+          wx.setStorageSync('notifiedLast', notifiedLast);
+        } catch (e) {
+          console.error('Failed to store notification state:', e);
+        }
+
+        this.setData({ chats, filteredChats: chats });
+        wx.showToast({
+          title: '您有新消息',
+          icon: 'none',
+          duration: 1500
+        });
+        if (wx.vibrateShort) {
+          wx.vibrateShort();
         }
       }
+    }).catch((error) => {
+      console.error('Failed to check for messages:', error);
+    });
+  },
+
+  /**
+   * 加载模拟数据
+   */
+  _loadMockData: function() {
+    const mockUsers = this.getMockUsers();
+    const mockChats = this.getMockChats();
+    
+    this.setData({
+      users: mockUsers,
+      chats: mockChats,
+      activeUsers: Object.values(mockUsers).filter(u => u.id !== 'me'),
+      filteredChats: mockChats,
+      loading: false
+    });
+  },
+
+  /**
+   * 获取模拟用户数据
+   */
+  getMockUsers: function() {
+    return {
+      'alex': {
+        id: 'alex',
+        nickname: 'Alex Reads',
+        name: 'Alex Reads',
+        avatar: 'https://images.unsplash.com/photo-1599566150163-29194dcaad36?w=150&h=150&fit=crop'
+      },
+      'sarah': {
+        id: 'sarah',
+        nickname: 'Sarah Jenkins',
+        name: 'Sarah Jenkins',
+        avatar: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=150&h=150&fit=crop'
+      }
+    };
+  },
+
+  /**
+   * 获取模拟聊天数据
+   */
+  getMockChats: function() {
+    return [
+      {
+        id: '1',
+        participantId: 'alex',
+        participants: ['me', 'alex'],
+        userName: 'Alex Reads',
+        lastMessage: "我可以发一张特写照片，如果你想要的话",
+        lastMessageTime: new Date(),
+        unreadCount: 0
+      },
+      {
+        id: '2',
+        participantId: 'sarah',
+        participants: ['me', 'sarah'],
+        userName: 'Sarah Jenkins',
+        lastMessage: '请问"Sapiens"这本书还有吗？',
+        lastMessageTime: new Date(),
+        unreadCount: 1
+      }
+    ];
+  },
+
+  /**
+   * 搜索输入处理
+   */
+  onSearchInput: function(e) {
+    const query = e.detail.value;
+    this.setData({ searchQuery: query });
+    this.filterChats();
+  },
+
+  /**
+   * 过滤聊天列表
+   */
+  filterChats: function() {
+    const { chats, searchQuery } = this.data;
+    
+    const filtered = chats.filter(chat => {
+      const chatName = chat.name || '';
+      const lastMsg = chat.lastMessage || '';
+      return chatName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+             lastMsg.toLowerCase().includes(searchQuery.toLowerCase());
     });
 
-    if (sawNew) {
-      this.setData({ chats: chats, filteredChats: chats });
-      try { wx.showToast({ title: '您有新消息', icon: 'none', duration: 1500 }); wx.vibrateShort && wx.vibrateShort(); } catch (e) {}
-    }
+    this.setData({ filteredChats: filtered });
   },
+
+  /**
+   * 点击聊天
+   */
+  onChatClick: function(e) {
+    const chatId = e.currentTarget.dataset.chatid;
+    wx.navigateTo({
+      url: '/pages/chatdetail/chatdetail?id=' + chatId
+    });
+  },
+
+  /**
+   * 点击用户开始新聊天
+   */
+  onUserClick: function(e) {
+    const userId = e.currentTarget.dataset.userid;
+    wx.navigateTo({
+      url: '/pages/chatdetail/chatdetail?userId=' + userId
+    });
+  },
+
+  /**
+   * 显示使用说明
+   */
+  onShowInstructions: function() {
+    wx.showModal({
+      title: '消息',
+      content: '在这里你可以与卖家聊天洽询你感兴趣的书籍',
+      showCancel: false,
+      confirmText: '我知道了'
+    });
+  }
+});,
 
   getMockUsers: function() {
     return {

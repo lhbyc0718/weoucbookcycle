@@ -95,9 +95,10 @@ func (ac *AuthController) Register(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    20000,
-		"message": "Registration successful",
+		"message": "注册成功",
 		"data": gin.H{
-			"token": token,
+			"token":     token,
+			"expiresIn": 7200,
 			"user": gin.H{
 				"id":             user.ID,
 				"username":       user.Username,
@@ -132,9 +133,10 @@ func (ac *AuthController) Login(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    20000,
-		"message": "Login successful",
+		"message": "登录成功",
 		"data": gin.H{
-			"token": token,
+			"token":     token,
+			"expiresIn": 7200,
 			"user": gin.H{
 				"id":             user.ID,
 				"username":       user.Username,
@@ -175,10 +177,11 @@ func (ac *AuthController) RefreshToken(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    20000,
-		"message": "Token refreshed successfully",
+		"message": "Token刷新成功",
 		"data": gin.H{
-			"token": newToken,
-			"user":  userInfo,
+			"token":     newToken,
+			"expiresIn": 7200,
+			"user":      userInfo,
 		},
 	})
 }
@@ -242,9 +245,10 @@ func (ac *AuthController) WeChatLogin(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    20000,
-		"message": "Login successful",
+		"message": "登录成功",
 		"data": gin.H{
-			"token": token,
+			"token":     token,
+			"expiresIn": 7200,
 			"user": gin.H{
 				"id":             user.ID,
 				"username":       user.Username,
